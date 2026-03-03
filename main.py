@@ -23,7 +23,8 @@ def parse_args():
     #
     parser = ArgumentParser(description='Implement of model')
 
-    parser.add_argument('--dataset-dir', type=str, default='dataset/IRSTD-1k')
+    parser.add_argument('--dataset-dir', type=str, default='dataset/IRSTD-1k',
+                        help='Dataset path; IRSTD-1k included in repo')
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--epochs', type=int, default=400)
     parser.add_argument('--lr', type=float, default=0.05)

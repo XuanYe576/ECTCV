@@ -16,3 +16,7 @@ weight/
 *.webp
 *.svg
 *.ico
+# Allow dataset images
+!dataset/**/*.png
+!dataset/**/*.jpg
+!dataset/**/*.jpeg

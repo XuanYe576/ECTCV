@@ -4,10 +4,12 @@ MSHNet for infrared small target detection, with multiple loss functions and Gau
 
 ## Datasets
 
+**IRSTD-1k** is included in this repo (`dataset/IRSTD-1k/`). Clone and run directly.
+
 | Dataset | Link |
 |---------|------|
+| **IRSTD-1k** | Included in repo / [ISNet GitHub](https://github.com/RuiZhang97/ISNet) |
 | **NUDT-SIRST** | [TIB LDM](https://service.tib.eu/ldmservice/dataset/nudt-sirst) / [GitHub](https://github.com/YimianDai/sirst) |
-| **IRSTD-1k** | [ISNet GitHub](https://github.com/RuiZhang97/ISNet) |
 | **SIRST-UAVB** | [IEEE DataPort](https://ieee-dataport.org/documents/sirst-uavb-single-frame-infrared-small-target-dataset-uav-and-birds) |
 | **NUAA-SIRST** | [SIRST GitHub](https://github.com/YimianDai/sirst) |
 
@@ -29,11 +31,14 @@ MSHNet for infrared small target detection, with multiple loss functions and Gau
 ## Usage
 
 ```bash
-# Train (single run)
-python main.py --dataset-dir /path/to/dataset --loss-type L1 --use-gaussian-pinwheel --gp-pipeline A
+# Train with included IRSTD-1k (default)
+python main.py --loss-type L1 --use-gaussian-pinwheel --gp-pipeline A
 
-# Batch train all L1/L2/L3/L4/Soft/LLoss + GP
-./train_ectcv.sh /path/to/dataset
+# Or specify dataset path
+python main.py --dataset-dir dataset/IRSTD-1k --loss-type L1
+
+# Batch train all losses + GP
+./train_ectcv.sh dataset/IRSTD-1k
 ```
 
 ## Requirements

@@ -5,6 +5,7 @@
 
 PYTHON="${2:-python}"
 DATASET="${1:-dataset/IRSTD-1k}"
+# IRSTD-1k included in repo; use as default
 EPOCHS=400
 BATCH=4
 BASE=256
