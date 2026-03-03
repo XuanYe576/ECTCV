@@ -1,13 +1,12 @@
 __pycache__/
 *.pyc
 *.pyo
-*.pkl
 .venv/
 venv/
 .env
 .DS_Store
 *.log
-weight/
+!weight/**/*.log
 *.png
 *.jpg
 *.jpeg
@@ -20,3 +19,5 @@ weight/
 !dataset/**/*.png
 !dataset/**/*.jpg
 !dataset/**/*.jpeg
+# Allow weight files (tracked by git-lfs)
+!weight/**/*.pkl

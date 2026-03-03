@@ -2,7 +2,9 @@
 
 MSHNet for infrared small target detection, with multiple loss functions and Gaussian-Pinwheel (GP) spatial attention variants.
 
-Based on the original [MSHNet (CVPR 2024)](https://github.com/Lliu666/MSHNet) — *Infrared Small Target Detection with Scale and Location Sensitivity*.
+Based on the original [MSHNet (CVPR 2024)](https://github.com/Lliu666/MSHNet) — *Infrared Small Target Detection with Scale and Location Sensitivity* ([arXiv](https://arxiv.org/abs/2403.19366)).
+
+> **Original paper**: Qiankun Liu, Rui Liu, Bolun Zheng, Hongkui Wang, Ying Fu. *Infrared Small Target Detection with Scale and Location Sensitivity*. CVPR 2024.
 
 ## Datasets
 
@@ -87,20 +89,53 @@ All comparison baselines are cloned under `~/Opap/`:
 ## Usage
 
 ```bash
-# Single experiment
+# Single experiment (with AMP for BF16 on Ampere+)
 python main.py --dataset-dir dataset/IRSTD-1k --loss-type L1 --mode train \
-    --epochs 400 --batch-size 32 --warm-epoch 40
+    --epochs 400 --batch-size 32 --warm-epoch 40 --amp
 
 # With GP Pipeline A
 python main.py --dataset-dir dataset/IRSTD-1k --loss-type L1 \
-    --use-gaussian-pinwheel --gp-pipeline A
+    --use-gaussian-pinwheel --gp-pipeline A --amp
 
 # Full ablation (all 39 experiments on one dataset)
 ./train_ectcv.sh dataset/IRSTD-1k
 
-# Run comparison baselines after ECTCV finishes
-./Opap/run_all_baselines.sh
+# Single dataset with skip (for resuming on another server)
+./train_single_dataset.sh dataset/SIRST-UAVB 1    # skip 1 already-done base experiment
+./train_single_dataset.sh dataset/NUDT-SIRST 0     # run all 39 from scratch
+./train_single_dataset.sh dataset/IRSTD-1k 2       # skip L1, L1-ONLY base
+./train_single_dataset.sh dataset/NUAA-SIRST 2     # skip L1, L1-ONLY base
 ```
+
+### Multi-Server Setup
+
+```bash
+# 1. Clone repo (includes weights from completed experiments)
+git clone git@github.com:XuanYe576/ECTCV.git && cd ECTCV
+git lfs pull   # download weight files
+
+# 2. Install environment
+conda create -n mshnet python=3.10 -y && conda activate mshnet
+pip install torch torchvision scikit-image Pillow tqdm
+
+# 3. Download dataset (e.g. SIRST-UAVB from Google Drive)
+#    Place under dataset/SIRST-UAVB/ with images/, masks/, trainval.txt, test.txt
+#    Run: python prepare_datasets.py  (binarize JPEG masks)
+
+# 4. Start training in tmux
+tmux new -s uavb
+./train_single_dataset.sh dataset/SIRST-UAVB 1
+```
+
+## AMP (Automatic Mixed Precision)
+
+Pass `--amp` to enable mixed precision training:
+- **A100/H100 (Ampere+)**: uses BF16 — same exponent range as FP32, no GradScaler needed
+- **Older GPUs**: uses FP16 + GradScaler
+
+Additional optimizations enabled by default:
+- `cudnn.benchmark = True` — auto-select fastest convolution algorithm
+- `float32_matmul_precision('high')` — TF32 for matmuls on Ampere+
 
 ## Requirements
 
@@ -116,8 +151,9 @@ tqdm
 
 ```
 ECTCV/
-├── main.py                  # Training entry point
-├── train_ectcv.sh           # Batch ablation script
+├── main.py                  # Training entry point (supports --amp)
+├── train_ectcv.sh           # Batch ablation script (all 39 experiments)
+├── train_single_dataset.sh  # Single dataset with skip (for multi-server)
 ├── prepare_datasets.py      # Dataset preparation & deduplication
 ├── model/
 │   ├── MSHNet.py            # Network (U-Net + CBAM + optional GP attention)
@@ -126,6 +162,7 @@ ECTCV/
 ├── utils/
 │   ├── data.py              # Dataset loader
 │   └── metric.py            # IoU, PD, FA, ROC metrics
+├── weight/                  # Saved model weights (git-lfs)
 └── dataset/
     ├── IRSTD-1k/            # Included
     ├── NUDT-SIRST/          # Download separately

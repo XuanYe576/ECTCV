@@ -16,6 +16,9 @@ import time
 
 os.environ['CUDA_VISIBLE_DEVICES']="0"
 
+torch.backends.cudnn.benchmark = True
+torch.set_float32_matmul_precision('high')
+
 def parse_args():
 
     #
@@ -57,6 +60,8 @@ def parse_args():
                         help='Three fixed masks (PI4,PI3,PI2_PI3) + learnable weights (only when --use-gaussian-pinwheel); save suffix -RotWeight')
     parser.add_argument('--use-rot-weight-two', action='store_true', default=False,
                         help='Two masks only (PI3, PI2_PI3, no pinwheel) + learnable weights; save suffix -RotWeight2')
+    parser.add_argument('--amp', action='store_true', default=False,
+                        help='Enable automatic mixed precision (BF16 on Ampere+, FP16 otherwise)')
 
     args = parser.parse_args()
     return args
@@ -224,6 +229,20 @@ class Trainer(object):
         self.best_iou = 0
         self.warm_epoch = args.warm_epoch
 
+        self.use_amp = getattr(args, 'amp', False) and torch.cuda.is_available()
+        if self.use_amp:
+            if torch.cuda.is_bf16_supported():
+                self.amp_dtype = torch.bfloat16
+                self.scaler = None
+                print('AMP enabled: BF16 (no GradScaler needed)')
+            else:
+                self.amp_dtype = torch.float16
+                self.scaler = torch.cuda.amp.GradScaler()
+                print('AMP enabled: FP16 + GradScaler')
+        else:
+            self.amp_dtype = None
+            self.scaler = None
+
         if args.mode=='train':
             if args.if_checkpoint:
                 check_folder = ''
@@ -270,6 +289,51 @@ class Trainer(object):
             self.warm_epoch = -1
         
 
+    def _compute_loss(self, pred, masks, labels, epoch):
+        loss = 0
+        if hasattr(self, 'use_lloss_for_irsoiou') and isinstance(self.loss_fun, IRSOIoULoss):
+            with_shape = self.use_lloss_for_irsoiou
+            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
+            for j in range(len(masks)):
+                if j>0:
+                    labels = self.down(labels)
+                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
+        elif hasattr(self, 'use_lloss_for_l3') and isinstance(self.loss_fun, L3IoULoss):
+            with_shape = self.use_lloss_for_l3
+            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
+            for j in range(len(masks)):
+                if j>0:
+                    labels = self.down(labels)
+                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
+        elif hasattr(self, 'use_lloss_for_l1') and isinstance(self.loss_fun, L1IoULoss):
+            with_shape = self.use_lloss_for_l1
+            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
+            for j in range(len(masks)):
+                if j>0:
+                    labels = self.down(labels)
+                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
+        elif hasattr(self, 'use_lloss_for_l2') and isinstance(self.loss_fun, L2IoULoss):
+            with_shape = self.use_lloss_for_l2
+            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
+            for j in range(len(masks)):
+                if j>0:
+                    labels = self.down(labels)
+                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
+        elif hasattr(self, 'use_lloss_for_l4') and isinstance(self.loss_fun, L4IoULoss):
+            with_shape = self.use_lloss_for_l4
+            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
+            for j in range(len(masks)):
+                if j>0:
+                    labels = self.down(labels)
+                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
+        else:
+            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch)
+            for j in range(len(masks)):
+                if j>0:
+                    labels = self.down(labels)
+                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch)
+        return loss / (len(masks)+1)
+
     def train(self, epoch):
         self.model.train()
         tbar = tqdm(self.train_loader)
@@ -283,57 +347,24 @@ class Trainer(object):
             if epoch>self.warm_epoch:
                 tag = True
 
-            masks, pred = self.model(data, tag)
-            loss = 0
-
-            if hasattr(self, 'use_lloss_for_irsoiou') and isinstance(self.loss_fun, IRSOIoULoss):
-                with_shape = self.use_lloss_for_irsoiou
-                loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
-                for j in range(len(masks)):
-                    if j>0:
-                        labels = self.down(labels)
-                    loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
-            elif hasattr(self, 'use_lloss_for_l3') and isinstance(self.loss_fun, L3IoULoss):
-                with_shape = self.use_lloss_for_l3
-                loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
-                for j in range(len(masks)):
-                    if j>0:
-                        labels = self.down(labels)
-                    loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
-            elif hasattr(self, 'use_lloss_for_l1') and isinstance(self.loss_fun, L1IoULoss):
-                with_shape = self.use_lloss_for_l1
-                loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
-                for j in range(len(masks)):
-                    if j>0:
-                        labels = self.down(labels)
-                    loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
-            elif hasattr(self, 'use_lloss_for_l2') and isinstance(self.loss_fun, L2IoULoss):
-                with_shape = self.use_lloss_for_l2
-                loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
-                for j in range(len(masks)):
-                    if j>0:
-                        labels = self.down(labels)
-                    loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
-            elif hasattr(self, 'use_lloss_for_l4') and isinstance(self.loss_fun, L4IoULoss):
-                with_shape = self.use_lloss_for_l4
-                loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
-                for j in range(len(masks)):
-                    if j>0:
-                        labels = self.down(labels)
-                    loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
+            if self.use_amp:
+                with torch.amp.autocast('cuda', dtype=self.amp_dtype):
+                    masks_out, pred = self.model(data, tag)
+                    loss = self._compute_loss(pred, masks_out, labels, epoch)
+                self.optimizer.zero_grad()
+                if self.scaler is not None:
+                    self.scaler.scale(loss).backward()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    loss.backward()
+                    self.optimizer.step()
             else:
-                # 其他损失函数使用默认参数（with_shape=True 是默认值）
-                loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch)
-                for j in range(len(masks)):
-                    if j>0:
-                        labels = self.down(labels)
-                    loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch)
-                
-            loss = loss / (len(masks)+1)
-        
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
+                masks_out, pred = self.model(data, tag)
+                loss = self._compute_loss(pred, masks_out, labels, epoch)
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
        
             losses.update(loss.item(), pred.size(0))
             tbar.set_description('Epoch %d, loss %.4f' % (epoch, losses.avg))
@@ -353,9 +384,11 @@ class Trainer(object):
                 if epoch>self.warm_epoch:
                     tag = True
 
-                loss = 0
-                _, pred = self.model(data, tag)
-                # loss += self.loss_fun(pred, mask,self.warm_epoch, epoch)
+                if self.use_amp:
+                    with torch.amp.autocast('cuda', dtype=self.amp_dtype):
+                        _, pred = self.model(data, tag)
+                else:
+                    _, pred = self.model(data, tag)
 
                 self.mIoU.update(pred, mask)
                 self.PD_FA.update(pred, mask)
