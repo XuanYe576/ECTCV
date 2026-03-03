@@ -6,6 +6,7 @@ import torch.utils.data as Data
 from model.MSHNet import *
 from model.loss import (
     SLSIoULoss, L2IoULoss, L1IoULoss, L3IoULoss, L4IoULoss,
+    IRSOIoULoss, L3WithDlossIoULoss,
     LLossOnlyLoss, SoftIoULossModule, AverageMeter,
 )
 from torch.optim import Adagrad
@@ -36,10 +37,12 @@ def parse_args():
     parser.add_argument('--mode', type=str, default='train')
     parser.add_argument('--weight-path', type=str, default='weight/IRSTD-1k_weight.tar')
     _loss_choices = ['L1', 'L1-ONLY', 'L1_ONLY', 'L2', 'L2-ONLY', 'L2_ONLY', 'L3', 'L3-ONLY', 'L3_ONLY',
-                     'L4', 'L4-ONLY', 'L4_ONLY', 'LLOSS_ONLY', 'SOFTIOU']
+                     'L3D', 'L3+D', 'L3_D', 'L4', 'L4-ONLY', 'L4_ONLY',
+                     'IRSOIOU', 'IR-SOIOU', 'RSOIOU', 'IRSOIOU_LLOSS', 'IRSOIOU-LLOSS', 'IRSOIOU_LL',
+                     'LLOSS_ONLY', 'LLOSS-ONLY', 'SOFTIOU']
     parser.add_argument('--loss-type', type=str, default='L2', 
                         choices=_loss_choices,
-                        help='Loss: L1, L2, L3, L4, SOFTIOU, LLOSS_ONLY (+ -ONLY variants)')
+                        help='Loss: L1, L2, L3, L3D, L4, IRSOIOU, IRSOIOU-LLOSS, LLOSS-ONLY, SOFTIOU (+ -ONLY)')
     parser.add_argument('--use-gaussian-pinwheel', action='store_true', default=False,
                         help='Use 7x7 Gaussian convolution + pinwheel mask in spatial attention to reduce false alarms (σ learnable per layer)')
     parser.add_argument('--use-rotated-pinwheel', action='store_true', default=False,
@@ -173,6 +176,10 @@ class Trainer(object):
             self.use_lloss_for_l3 = False  # 标记不使用 LLoss
             loss_name_for_dir = 'L3-ONLY'  # 使用 L3-ONLY 作为目录名
             print(f'Using Loss: L3 (Mobius IoU Loss without LLoss)')
+        elif loss_type == 'L3D' or loss_type == 'L3+D' or loss_type == 'L3_D':
+            self.loss_fun = L3WithDlossIoULoss()
+            loss_name_for_dir = 'L3D'
+            print(f'Using Loss: L3+D_loss (L3 IoU Loss with D_loss from IR-SOIoU)')
         elif loss_type == 'L4':
             self.loss_fun = L4IoULoss()
             self.use_lloss_for_l4 = True
@@ -183,7 +190,16 @@ class Trainer(object):
             self.use_lloss_for_l4 = False
             loss_name_for_dir = 'L4-ONLY'
             print(f'Using Loss: L4-ONLY (L4 IoU Loss without LLoss)')
-        elif loss_type == 'LLOSS_ONLY':
+        elif loss_type == 'IRSOIOU' or loss_type == 'IR-SOIOU' or loss_type == 'RSOIOU':
+            self.loss_fun = IRSOIoULoss()
+            loss_name_for_dir = 'IRSOIOU'
+            print(f'Using Loss: IR-SOIoU (Region Energy-Based Dynamic Loss with D_loss)')
+        elif loss_type == 'IRSOIOU_LLOSS' or loss_type == 'IRSOIOU-LLOSS' or loss_type == 'IRSOIOU_LL':
+            self.loss_fun = IRSOIoULoss()
+            self.use_lloss_for_irsoiou = True
+            loss_name_for_dir = 'IRSOIOU-LLOSS'
+            print(f'Using Loss: IR-SOIoU with LLoss')
+        elif loss_type == 'LLOSS_ONLY' or loss_type == 'LLOSS-ONLY':
             self.loss_fun = LLossOnlyLoss()
             loss_name_for_dir = 'LLOSS-ONLY'
             print(f'Using Loss: LLoss only (location/shape loss only)')
@@ -267,7 +283,14 @@ class Trainer(object):
             masks, pred = self.model(data, tag)
             loss = 0
 
-            if hasattr(self, 'use_lloss_for_l3') and isinstance(self.loss_fun, L3IoULoss):
+            if hasattr(self, 'use_lloss_for_irsoiou') and isinstance(self.loss_fun, IRSOIoULoss):
+                with_shape = self.use_lloss_for_irsoiou
+                loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
+                for j in range(len(masks)):
+                    if j>0:
+                        labels = self.down(labels)
+                    loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
+            elif hasattr(self, 'use_lloss_for_l3') and isinstance(self.loss_fun, L3IoULoss):
                 with_shape = self.use_lloss_for_l3
                 loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
                 for j in range(len(masks)):

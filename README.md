@@ -2,13 +2,24 @@
 
 MSHNet for infrared small target detection, with multiple loss functions and Gaussian-Pinwheel (GP) spatial attention variants.
 
+## Datasets
+
+| Dataset | Link |
+|---------|------|
+| **NUDT-SIRST** | [TIB LDM](https://service.tib.eu/ldmservice/dataset/nudt-sirst) / [GitHub](https://github.com/YimianDai/sirst) |
+| **IRSTD-1k** | [ISNet GitHub](https://github.com/RuiZhang97/ISNet) |
+| **SIRST-UAVB** | [IEEE DataPort](https://ieee-dataport.org/documents/sirst-uavb-single-frame-infrared-small-target-dataset-uav-and-birds) |
+| **NUAA-SIRST** | [SIRST GitHub](https://github.com/YimianDai/sirst) |
+
 ## Losses
 - **L1** / L1-ONLY: L1-based IoU
 - **L2** / L2-ONLY: L2-based IoU (SLS)
 - **L3** / L3-ONLY: L3-based IoU (Mobius)
+- **L3D**: L3 + D_loss (IR-SOIoU)
 - **L4** / L4-ONLY: L4-based IoU (Man Fung)
+- **IRSOIOU** / **IRSOIOU-LLOSS**: IR-SOIoU (Region Energy-Based)
+- **LLOSS-ONLY**: Location/shape loss only
 - **SOFTIOU**: Standard Soft IoU
-- **LLOSS_ONLY**: Location/shape loss only
 
 ## GP Variations
 - **Base**: Standard 7×7 spatial attention
