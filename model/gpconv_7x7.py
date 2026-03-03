@@ -1,7 +1,8 @@
 """
-Pipeline B for mmmpaperablation: line-energy -> hat_theta -> detach+quantize k -> gather.
+Pipeline B for mmmpaperablation: line-energy -> hat_theta -> differentiable orientation routing.
 - Kernel = mask only (L1-normalized), no Gaussian prior on the mask.
 - Learnable scalar gain on the mask output.
+- Learnable routing temperature + learnable rho (effective top-k ratio).
 - Scale 3->5->7: intended design is to compare 3x3 with/without Gaussian to see if it helps,
   then choose to step to 5x5, then 7x7 (not implemented here; current module is 7x7 only).
 """
@@ -37,11 +38,15 @@ def build_bank_7x7(n: int, tol: float = 0.5, eps: float = 1e-6, device=None, dty
     return W
 
 
-def _theta_to_k(hat_theta: torch.Tensor, n: int) -> torch.Tensor:
-    theta_det = hat_theta.detach()
-    phi = torch.remainder(theta_det, math.pi)
-    k = (phi / (math.pi / n)).round().long().clamp(0, n - 1)
-    return k.unsqueeze(1)
+def _circular_line_distance(theta: torch.Tensor, theta_centers: torch.Tensor) -> torch.Tensor:
+    """
+    Circular distance on line-orientation space [0, pi).
+    theta: (B,1,H,W), theta_centers: (1,n,1,1)
+    returns: (B,n,H,W) in [0, pi/2]
+    """
+    # Map delta to [-pi/2, pi/2], then abs for shortest line-orientation distance.
+    delta = torch.remainder(theta - theta_centers + 0.5 * math.pi, math.pi) - 0.5 * math.pi
+    return torch.abs(delta)
 
 
 class LineEnergyHead7x7(nn.Module):
@@ -97,27 +102,64 @@ class LineEnergyHead7x7(nn.Module):
 
 
 class GPConv7x7PipelineB(nn.Module):
-    """Pipeline B: line-energy -> k -> mask-only bank gather + learnable scalar gain. No Gaussian on mask."""
-    def __init__(self, n_orientations: int = 4, Q: int = 24, N: int = 8, T_theta: float = 1.0, tol: float = 0.5):
+    """Pipeline B with differentiable orientation routing."""
+    def __init__(
+        self,
+        n_orientations: int = 4,
+        Q: int = 24,
+        N: int = 8,
+        T_theta: float = 1.0,
+        tol: float = 0.5,
+        route_temp_init: float = 0.08,
+        rho_init: float = 0.5,
+        rho_min: float = 0.05,
+    ):
         super().__init__()
         self.n = max(1, n_orientations)
         self.line_energy = LineEnergyHead7x7(Q=Q, N=N, T_theta=T_theta, sigma_r=1.0)
         W = build_bank_7x7(self.n, tol=tol)
         self.register_buffer("_W", W)
         self.gain = nn.Parameter(torch.ones(1))
+        self.rho_min = float(max(1e-3, min(rho_min, 0.99)))
+        self.log_route_temp = nn.Parameter(torch.tensor(math.log(max(route_temp_init, 1e-3))))
+
+        rho_init = float(max(self.rho_min + 1e-4, min(rho_init, 0.999)))
+        rho_scaled = (rho_init - self.rho_min) / (1.0 - self.rho_min)
+        rho_scaled = max(1e-4, min(rho_scaled, 1 - 1e-4))
+        self.rho_logit = nn.Parameter(torch.tensor(math.log(rho_scaled / (1.0 - rho_scaled))))
+
+        # Orientation bin centers in [0, pi): (k + 0.5) * pi/n
+        Delta = math.pi / float(self.n)
+        theta0 = 0.5 * Delta
+        centers = theta0 + torch.arange(self.n, dtype=torch.float32) * Delta
+        self.register_buffer("_theta_centers", centers.view(1, self.n, 1, 1))
+
+    def _routing_weights(self, hat_theta: torch.Tensor) -> torch.Tensor:
+        """
+        hat_theta: (B,H,W) in [0, 2pi)
+        returns soft routing weights: (B,n,H,W)
+        """
+        theta = torch.remainder(hat_theta, math.pi).unsqueeze(1)
+        theta_centers = self._theta_centers.to(device=theta.device, dtype=theta.dtype)
+        dist = _circular_line_distance(theta, theta_centers)
+
+        route_temp = torch.exp(self.log_route_temp).clamp(min=1e-3, max=2.0)
+        base = F.softmax(-dist / route_temp, dim=1)
+
+        # rho in (rho_min, 1): controls sparsity (smaller rho -> sharper, top-k-like routing)
+        rho = torch.sigmoid(self.rho_logit) * (1.0 - self.rho_min) + self.rho_min
+        gamma = 1.0 / (rho + 1e-8)
+        sharp = torch.pow(base + 1e-12, gamma)
+        weights = sharp / (sharp.sum(dim=1, keepdim=True) + 1e-8)
+        return weights
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, 2, H, W). Returns (B, 1, H, W)."""
         hat_theta = self.line_energy(x)
-        k = _theta_to_k(hat_theta, self.n)
         W = self._W
         w = W.expand(self.n, 2, 7, 7).clone()
         y = F.conv2d(x, w, padding=3)
-        k = k.to(device=y.device, dtype=torch.long)
-        if k.dim() == 3:
-            k = k.unsqueeze(1)
-        while k.dim() > 4:
-            k = k.squeeze(1)
-        out = torch.gather(y, 1, k)
+        weights = self._routing_weights(hat_theta).to(dtype=y.dtype, device=y.device)
+        out = (y * weights).sum(dim=1, keepdim=True)
         return self.gain.clamp(min=1e-3) * out
 
