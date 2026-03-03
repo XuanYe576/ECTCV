@@ -72,8 +72,10 @@ class Trainer(object):
         trainset = IRSTD_Dataset(args, mode='train')
         valset = IRSTD_Dataset(args, mode='val')
 
-        self.train_loader = Data.DataLoader(trainset, args.batch_size, shuffle=True, drop_last=True)
-        self.val_loader = Data.DataLoader(valset, 1, drop_last=False)
+        self.train_loader = Data.DataLoader(trainset, args.batch_size, shuffle=True, drop_last=True,
+                                              num_workers=8, pin_memory=True, persistent_workers=True)
+        self.val_loader = Data.DataLoader(valset, 1, drop_last=False,
+                                          num_workers=4, pin_memory=True, persistent_workers=True)
 
         # 检查CUDA是否可用，如果不可用则使用CPU
         if torch.cuda.is_available():
