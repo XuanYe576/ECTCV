@@ -6,14 +6,14 @@ Based on the original [MSHNet (CVPR 2024)](https://github.com/Lliu666/MSHNet) �
 
 ## Datasets
 
-| Dataset | Images | Download |
-|---------|--------|----------|
-| **IRSTD-1k** | 1,001 | Included in repo (`dataset/IRSTD-1k/`) / [ISNet GitHub](https://github.com/RuiZhang97/ISNet) |
-| **NUDT-SIRST** | 1,327 | [BasicIRSTD Google Drive](https://drive.google.com/file/d/1LscYoPnqtE32qxv5v_dB4iOF4dW3bxL2/view?usp=sharing) / [TIB LDM](https://service.tib.eu/ldmservice/dataset/nudt-sirst) |
-| **NUAA-SIRST** | 427 | [BasicIRSTD Google Drive](https://drive.google.com/file/d/1LscYoPnqtE32qxv5v_dB4iOF4dW3bxL2/view?usp=sharing) / [SIRST GitHub](https://github.com/YimianDai/sirst) |
-| **SIRST-UAVB** | 3,000 | [Google Drive](https://drive.google.com/file/d/1hANdynk5C3fUQ1z2CqLRhAqUAfEsaWq8) / [IEEE DataPort](https://ieee-dataport.org/documents/sirst-uavb-single-frame-infrared-small-target-dataset-uav-and-birds) |
+| Dataset | Images | Download | Notes |
+|---------|--------|----------|-------|
+| **IRSTD-1k** | 1,001 | Included in repo (`dataset/IRSTD-1k/`) \| [ISNet GitHub](https://github.com/RuiZhang97/ISNet) | Ready to use |
+| **NUDT-SIRST** | 1,327 | [BasicIRSTD Google Drive](https://drive.google.com/file/d/1LscYoPnqtE32qxv5v_dB4iOF4dW3bxL2/view?usp=sharing) \| [TIB LDM](https://service.tib.eu/ldmservice/dataset/nudt-sirst) | Download → `dataset/NUDT-SIRST/` |
+| **NUAA-SIRST** | 427 | [BasicIRSTD Google Drive](https://drive.google.com/file/d/1LscYoPnqtE32qxv5v_dB4iOF4dW3bxL2/view?usp=sharing) \| [SIRST GitHub](https://github.com/YimianDai/sirst) | Download → `dataset/NUAA-SIRST/` |
+| **SIRST-UAVB** | 3,000 | [Google Drive](https://drive.google.com/file/d/1hANdynk5C3fUQ1z2CqLRhAqUAfEsaWq8) \| [IEEE DataPort](https://ieee-dataport.org/documents/sirst-uavb-single-frame-infrared-small-target-dataset-uav-and-birds) | JPEG masks → run `prepare_datasets.py` |
 
-> **Note:** SIRST-UAVB masks are stored as JPEG; run `prepare_datasets.py` to convert to binary PNG and deduplicate.
+> **Note:** SIRST-UAVB masks are originally JPEG with compression artifacts; run `prepare_datasets.py` to binarize (threshold 128) and convert to PNG. The script also deduplicates images shared across datasets.
 
 Place each dataset under `dataset/` with the following structure:
 
@@ -70,16 +70,19 @@ tmux new -s uavb  && ./train_ectcv.sh dataset/SIRST-UAVB
 tmux new -s irstd && ./train_ectcv.sh dataset/IRSTD-1k
 ```
 
-## Comparison Methods
+## Comparison Methods (Opap)
 
-| Method | Venue | Code |
-|--------|-------|------|
-| [MSHNet](https://github.com/Lliu666/MSHNet) | CVPR 2024 | Ours (base) |
-| [DNA-Net](https://github.com/YeRen123455/Infrared-Small-Target-Detection) | TIP 2022 | `Opap/DNANet/` |
-| [UIU-Net](https://github.com/danfenghong/IEEE_TIP_UIU-Net) | TIP 2023 | `Opap/UIUNet/` |
-| [SCTransNet](https://github.com/xdFai/SCTransNet) | TGRS 2024 | `Opap/SCTransNet/` |
-| [MTU-Net](https://github.com/TianhaoWu16/Multi-level-TransUNet-for-Space-based-Infrared-Tiny-ship-Detection) | TGRS 2023 | `Opap/MTUNet/` |
-| [ACM](https://github.com/Tianfang-Zhang/acm-pytorch) | WACV 2021 | `Opap/ACM-pytorch/` |
+All comparison baselines are cloned under `~/Opap/`:
+
+| Method | Venue | GitHub | Local Path |
+|--------|-------|--------|------------|
+| [MSHNet](https://github.com/Lliu666/MSHNet) | CVPR 2024 | <https://github.com/Lliu666/MSHNet> | Ours (base) |
+| [DNA-Net](https://github.com/YeRen123455/Infrared-Small-Target-Detection) | TIP 2022 | <https://github.com/YeRen123455/Infrared-Small-Target-Detection> | `Opap/DNANet/` |
+| [UIU-Net](https://github.com/danfenghong/IEEE_TIP_UIU-Net) | TIP 2023 | <https://github.com/danfenghong/IEEE_TIP_UIU-Net> | `Opap/UIUNet/` |
+| [SCTransNet](https://github.com/xdFai/SCTransNet) | TGRS 2024 | <https://github.com/xdFai/SCTransNet> | `Opap/SCTransNet/` |
+| [MTU-Net](https://github.com/TianhaoWu16/Multi-level-TransUNet-for-Space-based-Infrared-Tiny-ship-Detection) | TGRS 2023 | <https://github.com/TianhaoWu16/Multi-level-TransUNet-for-Space-based-Infrared-Tiny-ship-Detection> | `Opap/MTUNet/` |
+| [ACM (Tianfang)](https://github.com/Tianfang-Zhang/acm-pytorch) | WACV 2021 | <https://github.com/Tianfang-Zhang/acm-pytorch> | `Opap/ACM-pytorch/` |
+| [ACM (YimianDai)](https://github.com/YimianDai/open-acm) | WACV 2021 | <https://github.com/YimianDai/open-acm> | `Opap/ACM/` |
 
 ## Usage
 
