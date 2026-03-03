@@ -1,8 +1,9 @@
 """
-Pipeline B for mmmpaperablation: line-energy -> hat_theta -> differentiable orientation routing.
+Pipeline B for mmmpaperablation: line-energy -> hat_theta -> learnable orientation mixing.
 - Kernel = mask only (L1-normalized), no Gaussian prior on the mask.
 - Learnable scalar gain on the mask output.
 - Learnable routing temperature + learnable rho (effective top-k ratio).
+- Distance is used only as output gain/decay gate (NOT used in routing weights).
 - Scale 3->5->7: intended design is to compare 3x3 with/without Gaussian to see if it helps,
   then choose to step to 5x5, then 7x7 (not implemented here; current module is 7x7 only).
 """
@@ -68,7 +69,7 @@ class LineEnergyHead7x7(nn.Module):
         grid = torch.stack([gx_n, gy_n], dim=-1).unsqueeze(0).expand(B, -1, -1, -1)
         return grid
 
-    def forward(self, X: torch.Tensor) -> torch.Tensor:
+    def forward(self, X: torch.Tensor, return_pi_q: bool = False):
         B, C, H, W = X.shape
         device = X.device
         dtype = X.dtype
@@ -98,11 +99,14 @@ class LineEnergyHead7x7(nn.Module):
         cx = (pi_q * cos_q).sum(dim=1).squeeze(1)
         hat_theta = torch.atan2(sy, cx)
         hat_theta = torch.remainder(hat_theta + 2 * math.pi, 2 * math.pi)
+        if return_pi_q:
+            # pi_q: (B,Q,1,H,W) -> (B,Q,H,W)
+            return hat_theta.squeeze(1), pi_q.squeeze(2)
         return hat_theta.squeeze(1)
 
 
 class GPConv7x7PipelineB(nn.Module):
-    """Pipeline B with differentiable orientation routing."""
+    """Pipeline B with learnable orientation mixing and distance gate."""
     def __init__(
         self,
         n_orientations: int = 4,
@@ -113,6 +117,7 @@ class GPConv7x7PipelineB(nn.Module):
         route_temp_init: float = 0.08,
         rho_init: float = 0.5,
         rho_min: float = 0.05,
+        dist_decay_init: float = 2.0,
     ):
         super().__init__()
         self.n = max(1, n_orientations)
@@ -133,18 +138,28 @@ class GPConv7x7PipelineB(nn.Module):
         theta0 = 0.5 * Delta
         centers = theta0 + torch.arange(self.n, dtype=torch.float32) * Delta
         self.register_buffer("_theta_centers", centers.view(1, self.n, 1, 1))
+        self.log_dist_decay = nn.Parameter(torch.tensor(math.log(max(dist_decay_init, 1e-3))))
 
-    def _routing_weights(self, hat_theta: torch.Tensor) -> torch.Tensor:
+    def _routing_weights(self, pi_q: torch.Tensor) -> torch.Tensor:
         """
-        hat_theta: (B,H,W) in [0, 2pi)
+        pi_q: (B,Q,H,W), from line-integral energy branch
         returns soft routing weights: (B,n,H,W)
         """
-        theta = torch.remainder(hat_theta, math.pi).unsqueeze(1)
-        theta_centers = self._theta_centers.to(device=theta.device, dtype=theta.dtype)
-        dist = _circular_line_distance(theta, theta_centers)
+        B, Q, H, W = pi_q.shape
+        device = pi_q.device
+        dtype = pi_q.dtype
+
+        # Map directional bins q in [0, 2pi) to line-orientation bins in [0, pi).
+        theta_q = (2 * math.pi * torch.arange(Q, device=device, dtype=dtype) / Q)
+        phi_q = torch.remainder(theta_q, math.pi)  # line orientation
+        k_idx = torch.clamp((phi_q / (math.pi / self.n)).long(), 0, self.n - 1)  # (Q,)
+
+        # Aggregate line-integral probabilities into n orientation bins.
+        base = torch.zeros(B, self.n, H, W, device=device, dtype=dtype)
+        base = base.index_add(1, k_idx, pi_q)
 
         route_temp = torch.exp(self.log_route_temp).clamp(min=1e-3, max=2.0)
-        base = F.softmax(-dist / route_temp, dim=1)
+        base = F.softmax(base / route_temp, dim=1)
 
         # rho in (rho_min, 1): controls sparsity (smaller rho -> sharper, top-k-like routing)
         rho = torch.sigmoid(self.rho_logit) * (1.0 - self.rho_min) + self.rho_min
@@ -153,13 +168,28 @@ class GPConv7x7PipelineB(nn.Module):
         weights = sharp / (sharp.sum(dim=1, keepdim=True) + 1e-8)
         return weights
 
+    def _distance_gate(self, hat_theta: torch.Tensor) -> torch.Tensor:
+        """
+        Distance-based attenuation gate in [0, 1], applied after orientation mixing.
+        Distance does not affect routing weights.
+        """
+        theta = torch.remainder(hat_theta, math.pi).unsqueeze(1)
+        theta_centers = self._theta_centers.to(device=theta.device, dtype=theta.dtype)
+        dist = _circular_line_distance(theta, theta_centers)
+        min_dist = dist.min(dim=1).values  # (B,H,W), in [0, pi/2]
+        min_dist_norm = min_dist / (0.5 * math.pi + 1e-8)
+        decay = torch.exp(self.log_dist_decay).clamp(min=1e-3, max=20.0)
+        gate = torch.exp(-decay * min_dist_norm).clamp(min=0.0, max=1.0)
+        return gate
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, 2, H, W). Returns (B, 1, H, W)."""
-        hat_theta = self.line_energy(x)
+        hat_theta, pi_q = self.line_energy(x, return_pi_q=True)
         W = self._W
         w = W.expand(self.n, 2, 7, 7).clone()
         y = F.conv2d(x, w, padding=3)
-        weights = self._routing_weights(hat_theta).to(dtype=y.dtype, device=y.device)
+        weights = self._routing_weights(pi_q).to(dtype=y.dtype, device=y.device)
         out = (y * weights).sum(dim=1, keepdim=True)
-        return self.gain.clamp(min=1e-3) * out
+        gate = self._distance_gate(hat_theta).unsqueeze(1).to(dtype=out.dtype, device=out.device)
+        return self.gain.clamp(min=1e-3) * out * gate
 
