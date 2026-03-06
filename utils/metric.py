@@ -1,3 +1,13 @@
+"""
+utils/metric.py — version used for all reported training runs (weight/*/metric.log).
+
+- Repo version: unchanged in b9ac99f (same as 7a40c6a). All runs in the chat table used this module.
+- mIoU: batch_intersection_union(pred, target) with predict = (output > 0).float() (i.e. sigmoid > 0.5).
+- PD_FA: score_thresh = iBin * (255/self.bins) (bin index 0..bins); preds compared to labels after
+  measure.label; PD = matched targets (centroid distance < 3), FA = unmatched pred area; Final_FA
+  = FA / (size*size * img_num), Final_PD = PD / target.
+- ROCMetric: score_thresh = (iBin + 0) / self.bins for ROC/PR curves (sigmoid > thresh).
+"""
 import  numpy as np
 import torch.nn as nn
 import torch
@@ -39,18 +49,6 @@ class ROCMetric():
 
 
         return tp_rates, fp_rates, recall, precision
-
-    @staticmethod
-    def ap_from_pr(recall, precision, num_points=11):
-        """11-point interpolated Average Precision from (recall, precision) curve."""
-        recall = np.asarray(recall).flatten()
-        precision = np.asarray(precision).flatten()
-        rec_levels = np.linspace(0, 1, num_points)
-        p_interp = []
-        for r in rec_levels:
-            mask = recall >= r
-            p_interp.append(precision[mask].max() if mask.any() else 0.0)
-        return float(np.mean(p_interp))
 
     def reset(self):
 
