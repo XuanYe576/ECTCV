@@ -36,8 +36,7 @@ def parse_args():
     parser.add_argument('--base-size', type=int, default=256)
     parser.add_argument('--crop-size', type=int, default=256)
     parser.add_argument('--multi-gpus', type=bool, default=False)
-    parser.add_argument('--if-checkpoint', action='store_true', help='Resume from checkpoint (requires --checkpoint-dir)')
-    parser.add_argument('--checkpoint-dir', type=str, default='', help='Path to folder containing checkpoint.pkl (e.g. weight/MSHNet-L1-...)')
+    parser.add_argument('--if-checkpoint', type=bool, default=False)
 
     parser.add_argument('--mode', type=str, default='train')
     parser.add_argument('--weight-path', type=str, default='weight/IRSTD-1k_weight.tar')
@@ -246,13 +245,8 @@ class Trainer(object):
 
         if args.mode=='train':
             if args.if_checkpoint:
-                check_folder = getattr(args, 'checkpoint_dir', '').strip()
-                if not check_folder:
-                    raise ValueError('Resume requires --checkpoint-dir')
-                ckpt_path = osp.join(check_folder, 'checkpoint.pkl')
-                if not osp.isfile(ckpt_path):
-                    raise FileNotFoundError(f'checkpoint.pkl not found in: {check_folder}')
-                checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+                check_folder = ''
+                checkpoint = torch.load(check_folder+'/checkpoint.pkl')
                 self.model.load_state_dict(checkpoint['net'])
                 self.optimizer.load_state_dict(checkpoint['optimizer'])
                 self.start_epoch = checkpoint['epoch']+1
