@@ -53,21 +53,18 @@ class SoftIoULossModule(nn.Module):
 
 
 class SLSIoULoss(nn.Module):
+    """L2 (SLS): alpha = (min + (Δ/2)^2) / (max + (Δ/2)^2), Δ = A_p - A_t."""
     def __init__(self):
         super(SLSIoULoss, self).__init__()
-
 
     def forward(self, pred_log, target,warm_epoch, epoch, with_shape=True):
         pred = torch.sigmoid(pred_log)
         smooth = 0.0
-
         intersection = pred * target
-
         intersection_sum = torch.sum(intersection, dim=(1,2,3))
         pred_sum = torch.sum(pred, dim=(1,2,3))
         target_sum = torch.sum(target, dim=(1,2,3))
-        
-        dis = torch.pow((pred_sum-target_sum)/2, 2)
+        dis = torch.pow((pred_sum - target_sum) / 2.0, 2)
         
         
         alpha = (torch.min(pred_sum, target_sum) + dis + smooth) / (torch.max(pred_sum, target_sum) + dis + smooth) 
@@ -126,32 +123,28 @@ class L2IoULoss(nn.Module):
 
 
 def LLoss(pred, target):
+        """Location/shape loss. Centroids = sum(x*mass)/sum(mass), not mean over pixels."""
         loss = torch.tensor(0.0, requires_grad=True).to(pred)
-
         patch_size = pred.shape[0]
-        h = pred.shape[2]
-        w = pred.shape[3]        
-        x_index = torch.arange(0,w,1).view(1, 1, w).repeat((1,h,1)).to(pred) / w
-        y_index = torch.arange(0,h,1).view(1, h, 1).repeat((1,1,w)).to(pred) / h
+        h, w = pred.shape[2], pred.shape[3]
+        x_index = torch.arange(0, w, 1, dtype=pred.dtype, device=pred.device).view(1, 1, w).repeat(1, h, 1)
+        y_index = torch.arange(0, h, 1, dtype=pred.dtype, device=pred.device).view(1, h, 1).repeat(1, 1, w)
         smooth = 1e-8
-        for i in range(patch_size):  
-
-            pred_centerx = (x_index*pred[i]).mean()
-            pred_centery = (y_index*pred[i]).mean()
-
-            target_centerx = (x_index*target[i]).mean()
-            target_centery = (y_index*target[i]).mean()
-           
-            angle_loss = (4 / (torch.pi**2) ) * (torch.square(torch.arctan((pred_centery) / (pred_centerx + smooth)) 
-                                                            - torch.arctan((target_centery) / (target_centerx + smooth))))
-
-            pred_length = torch.sqrt(pred_centerx*pred_centerx + pred_centery*pred_centery + smooth)
-            target_length = torch.sqrt(target_centerx*target_centerx + target_centery*target_centery + smooth)
-            
+        for i in range(patch_size):
+            pi, ti = pred[i], target[i]
+            psum = pi.sum() + smooth
+            tsum = ti.sum() + smooth
+            pred_centerx = (x_index * pi).sum() / psum
+            pred_centery = (y_index * pi).sum() / psum
+            target_centerx = (x_index * ti).sum() / tsum
+            target_centery = (y_index * ti).sum() / tsum
+            angle_loss = (4 / (torch.pi ** 2)) * (
+                torch.square(torch.arctan(pred_centery / (pred_centerx + smooth))
+                            - torch.arctan(target_centery / (target_centerx + smooth)))
+            pred_length = torch.sqrt(pred_centerx * pred_centerx + pred_centery * pred_centery + smooth)
+            target_length = torch.sqrt(target_centerx * target_centerx + target_centery * target_centery + smooth)
             length_loss = (torch.min(pred_length, target_length)) / (torch.max(pred_length, target_length) + smooth)
-        
             loss = loss + (1 - length_loss + angle_loss) / patch_size
-        
         return loss
 
 
@@ -375,12 +368,11 @@ class L4IoULoss(nn.Module):
         pred_sum = torch.sum(pred, dim=(1,2,3))
         target_sum = torch.sum(target, dim=(1,2,3))
         
-        # 计算方差
-        var = torch.pow((pred_sum - target_sum) / 2.0, 2)
+        # variance 全局 abs: var = |Δ|/2
+        var = torch.abs(pred_sum - target_sum) / 2.0
         m = torch.min(pred_sum, target_sum)
         M = torch.max(pred_sum, target_sum)
-        
-        # L4 alpha: min / (max + 2*var)
+        # L4 alpha: min / (max + 2*var) = min / (max + |Δ|)
         alpha = (m + smooth) / (M + 2.0 * var + smooth)
         
         loss = (intersection_sum + smooth) / \

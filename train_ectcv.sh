@@ -20,7 +20,7 @@ echo "=== Base MSHNet (no GP) ==="
 for LOSS in "${LOSSES[@]}"; do
     echo "[$(date)] loss=$LOSS (base)"
     $PYTHON main.py --dataset-dir "$DATASET" --loss-type "$LOSS" --mode train \
-        --epochs $EPOCHS --batch-size $BATCH --base-size $BASE --crop-size $CROP --warm-epoch $WARM
+        --epochs $EPOCHS --batch-size $BATCH --base-size $BASE --crop-size $CROP --warm-epoch $WARM --amp
 done
 
 echo "=== MSHNet + GP Pipeline A ==="
@@ -28,7 +28,7 @@ for LOSS in "${LOSSES[@]}"; do
     echo "[$(date)] loss=$LOSS + GP-PipelineA"
     $PYTHON main.py --dataset-dir "$DATASET" --loss-type "$LOSS" --mode train \
         --use-gaussian-pinwheel --gp-pipeline A \
-        --epochs $EPOCHS --batch-size $BATCH --base-size $BASE --crop-size $CROP --warm-epoch $WARM
+        --epochs $EPOCHS --batch-size $BATCH --base-size $BASE --crop-size $CROP --warm-epoch $WARM --amp
 done
 
 echo "=== MSHNet + GP Pipeline B ==="
@@ -36,7 +36,7 @@ for LOSS in "${LOSSES[@]}"; do
     echo "[$(date)] loss=$LOSS + GP-PipelineB"
     $PYTHON main.py --dataset-dir "$DATASET" --loss-type "$LOSS" --mode train \
         --use-gaussian-pinwheel --gp-pipeline B \
-        --epochs $EPOCHS --batch-size $BATCH --base-size $BASE --crop-size $CROP --warm-epoch $WARM
+        --epochs $EPOCHS --batch-size $BATCH --base-size $BASE --crop-size $CROP --warm-epoch $WARM --amp
 done
 
 echo "Done."
