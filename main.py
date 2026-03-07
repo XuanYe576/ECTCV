@@ -4,20 +4,15 @@ from argparse import ArgumentParser
 import torch
 import torch.utils.data as Data
 from model.MSHNet import *
-from model.loss import (
-    SLSIoULoss, L2IoULoss, L1IoULoss, L3IoULoss, L4IoULoss,
-    IRSOIoULoss, L3WithDlossIoULoss,
-    LLossOnlyLoss, SoftIoULossModule, AverageMeter,
-)
+from model.loss import SLSIoULoss, L2IoULoss, L1IoULoss, L3IoULoss, L4IoULoss, IRSOIoULoss, L3WithDlossIoULoss, LLossOnlyLoss, SoftIoULossModule, FocalIoULoss, AverageMeter
+
 from torch.optim import Adagrad
 from tqdm import tqdm
+import os
 import os.path as osp
 import time
 
 os.environ['CUDA_VISIBLE_DEVICES']="0"
-
-torch.backends.cudnn.benchmark = True
-torch.set_float32_matmul_precision('high')
 
 def parse_args():
 
@@ -26,8 +21,7 @@ def parse_args():
     #
     parser = ArgumentParser(description='Implement of model')
 
-    parser.add_argument('--dataset-dir', type=str, default='dataset/IRSTD-1k',
-                        help='Dataset path; IRSTD-1k included in repo')
+    parser.add_argument('--dataset-dir', type=str, default=osp.join(osp.dirname(osp.abspath(__file__)), 'dataset', 'IRSTD-1k'))
     parser.add_argument('--batch-size', type=int, default=4)
     parser.add_argument('--epochs', type=int, default=400)
     parser.add_argument('--lr', type=float, default=0.05)
@@ -36,33 +30,24 @@ def parse_args():
     parser.add_argument('--base-size', type=int, default=256)
     parser.add_argument('--crop-size', type=int, default=256)
     parser.add_argument('--multi-gpus', type=bool, default=False)
-    parser.add_argument('--if-checkpoint', action='store_true', help='Resume from checkpoint (requires --checkpoint-dir)')
-    parser.add_argument('--checkpoint-dir', type=str, default='', help='Path to folder containing checkpoint.pkl (e.g. weight/MSHNet-L1-...)')
+    parser.add_argument('--if-checkpoint', action='store_true',
+                        help='从已有 checkpoint 恢复训练，需同时指定 --checkpoint-dir')
+    parser.add_argument('--checkpoint-dir', type=str, default='',
+                        help='恢复训练时权重目录，如 weight/MSHNet-dinov3-convnext-tiny-decoder-skip-L3-2026-02-22-07-48-01')
 
     parser.add_argument('--mode', type=str, default='train')
     parser.add_argument('--weight-path', type=str, default='weight/IRSTD-1k_weight.tar')
-    _loss_choices = ['L1', 'L1-ONLY', 'L1_ONLY', 'L2', 'L2-ONLY', 'L2_ONLY', 'L3', 'L3-ONLY', 'L3_ONLY',
-                     'L3D', 'L3+D', 'L3_D', 'L4', 'L4-ONLY', 'L4_ONLY',
-                     'IRSOIOU', 'IR-SOIOU', 'RSOIOU', 'IRSOIOU_LLOSS', 'IRSOIOU-LLOSS', 'IRSOIOU_LL',
-                     'LLOSS_ONLY', 'LLOSS-ONLY', 'SOFTIOU']
     parser.add_argument('--loss-type', type=str, default='L2', 
-                        choices=_loss_choices,
-                        help='Loss: L1, L2, L3, L3D, L4, IRSOIOU, IRSOIOU-LLOSS, LLOSS-ONLY, SOFTIOU (+ -ONLY)')
-    parser.add_argument('--use-gaussian-pinwheel', action='store_true', default=False,
-                        help='Use 7x7 Gaussian convolution + pinwheel mask in spatial attention to reduce false alarms (σ learnable per layer)')
-    parser.add_argument('--use-rotated-pinwheel', action='store_true', default=False,
-                        help='Add multi-orientation rotated pinwheel (only when --use-gaussian-pinwheel); fuse by argmax over orientations')
-    parser.add_argument('--gp-pipeline', type=str, default=None, choices=['A', 'B'], help='GP: A=argmax, B=line-energy+k-gather')
-    parser.add_argument('--n-orientations', type=int, default=4,
-                        help='Number of orientations for rotated pinwheel when --use-rotated-pinwheel (default 4)')
-    parser.add_argument('--use-learnable-rotated-pinwheel', action='store_true', default=False,
-                        help='Use learnable rotated pinwheel mask (init_angle, rotate_angle, tau); only when --use-gaussian-pinwheel, replaces fixed pinwheel')
-    parser.add_argument('--use-rot-weight', action='store_true', default=False,
-                        help='Three fixed masks (PI4,PI3,PI2_PI3) + learnable weights (only when --use-gaussian-pinwheel); save suffix -RotWeight')
-    parser.add_argument('--use-rot-weight-two', action='store_true', default=False,
-                        help='Two masks only (PI3, PI2_PI3, no pinwheel) + learnable weights; save suffix -RotWeight2')
-    parser.add_argument('--amp', action='store_true', default=False,
-                        help='Enable automatic mixed precision (BF16 on Ampere+, FP16 otherwise)')
+                        choices=['L1', 'L1-ONLY', 'L1_ONLY', 'L2', 'L2-ONLY', 'L2_ONLY', 'L3', 'L3_NO_LLOSS', 'L3-ONLY', 'L3_ONLY', 'L3D', 'L3+D', 'L3_D', 'L4', 'L4-ONLY', 'L4_ONLY', 'LLOSS-ONLY', 'LLOSS_ONLY', 'SOFTIOU', 'SOFT_IOU', 'IRSOIOU', 'IR-SOIOU', 'RSOIOU', 'IRSOIOU_LLOSS', 'IRSOIOU-LLOSS', 'IRSOIOU_LL', 'L1-FOCAL', 'L1_FOCAL', 'L2-FOCAL', 'L2_FOCAL', 'L3-FOCAL', 'L3_FOCAL', 'L4-FOCAL', 'L4_FOCAL'],
+                        help='Loss function type: L1, L2, L3, L4, *-ONLY, LLOSS-ONLY, SOFTIOU, L3D, IRSOIOU, IRSOIOU_LLOSS')
+
+    # Focal Loss 参数（配合 --loss-type focal 使用）
+    parser.add_argument('--focal-gamma', type=float, default=2.0,
+                        help='FocalIoU: focal 衰减指数 γ（越大越聚焦难样本，默认 2.0）')
+    parser.add_argument('--focal-alpha', type=float, default=0.75,
+                        help='FocalIoU: 正样本权重 α（目标像素权重，默认 0.75）')
+    parser.add_argument('--focal-w', type=float, default=1.0,
+                        help='FocalIoU: Focal BCE 相对于 L1-IoU 的权重系数（默认 1.0）')
 
     args = parser.parse_args()
     return args
@@ -77,11 +62,10 @@ class Trainer(object):
 
         trainset = IRSTD_Dataset(args, mode='train')
         valset = IRSTD_Dataset(args, mode='val')
+        print(f'Train samples: {len(trainset)} (trainval.txt)  |  Val samples: {len(valset)} (test.txt)')
 
-        self.train_loader = Data.DataLoader(trainset, args.batch_size, shuffle=True, drop_last=True,
-                                              num_workers=8, pin_memory=True, persistent_workers=True)
-        self.val_loader = Data.DataLoader(valset, 1, drop_last=False,
-                                          num_workers=4, pin_memory=True, persistent_workers=True)
+        self.train_loader = Data.DataLoader(trainset, args.batch_size, shuffle=True, drop_last=False)
+        self.val_loader = Data.DataLoader(valset, 1, drop_last=False)
 
         # 检查CUDA是否可用，如果不可用则使用CPU
         if torch.cuda.is_available():
@@ -95,49 +79,9 @@ class Trainer(object):
             print('CUDA not available, using CPU')
         self.device = device
 
-        use_gp = getattr(args, 'use_gaussian_pinwheel', False)
-        use_rot = getattr(args, 'use_rotated_pinwheel', False)
-        gp_pipeline = getattr(args, 'gp_pipeline', None)
-        use_rot = getattr(args, 'use_rotated_pinwheel', False)
-        use_learn_rot = getattr(args, 'use_learnable_rotated_pinwheel', False)
-        use_rot_weight = getattr(args, 'use_rot_weight', False)
-        use_rot_weight_two = getattr(args, 'use_rot_weight_two', False)
-        n_orient = getattr(args, 'n_orientations', 4)
-        use_gp_pipeline_b = bool(use_gp and gp_pipeline == 'B')
-        if use_gp and gp_pipeline == 'A':
-            use_rot = True
-        if use_gp and gp_pipeline == 'B':
-            use_rot = False
-            use_learn_rot = False
-            use_rot_weight = False
-            use_rot_weight_two = False
-        if use_rot and not use_gp:
-            use_rot = False
-        if use_learn_rot and not use_gp:
-            use_learn_rot = False
-        if use_rot_weight and not use_gp:
-            use_rot_weight = False
-        if use_rot_weight_two and not use_gp:
-            use_rot_weight_two = False
-        if use_rot_weight or use_rot_weight_two:
-            use_rot = False
-            use_learn_rot = False
-        if use_rot_weight_two:
-            use_rot_weight = False
-        if use_learn_rot and use_rot:
-            use_rot = False
-        model = MSHNet(3, use_gaussian_pinwheel=use_gp, use_rotated_pinwheel=use_rot, n_orientations=n_orient, use_learnable_rotated_pinwheel=use_learn_rot, use_rot_weight=use_rot_weight, use_rot_weight_two=use_rot_weight_two, gp_pipeline_b=use_gp_pipeline_b)
-        if use_gp:
-            msg = 'Spatial attention: 7x7 Gaussian + pinwheel (σ learnable)'
-            if use_rot_weight_two:
-                msg += ' + 2 masks (PI3, PI2_PI3) with learnable weights (-RotWeight2)'
-            elif use_rot_weight:
-                msg += ' + 3 fixed rotation masks with learnable weights (-RotWeight)'
-            elif use_learn_rot:
-                msg += ' + learnable rotated mask (init_angle, rotate_angle, tau)'
-            elif use_rot:
-                msg += ' + rotated pinwheel (n=%d)' % n_orient
-            print(msg)
+        # Base MSHNet only (ResNet + CA + SA, no edge/SMA/LDRB/GP)
+        model = MSHNet(3)
+        print('Backbone: Base MSHNet')
 
         if args.multi_gpus:
             if torch.cuda.device_count() > 1:
@@ -147,31 +91,37 @@ class Trainer(object):
         self.model = model
 
         self.optimizer = Adagrad(filter(lambda p: p.requires_grad, self.model.parameters()), lr=args.lr)
-
         self.down = nn.MaxPool2d(2, 2)
-        
+        self.full_res_deepsup = False
+
         # 根据参数选择损失函数
         loss_type = args.loss_type.upper()
         # 保存标准化的损失函数名称用于目录命名
         loss_name_for_dir = loss_type
         
-        if loss_type == 'L1':
+        if loss_type in ('L1-FOCAL', 'L1_FOCAL', 'L2-FOCAL', 'L2_FOCAL', 'L3-FOCAL', 'L3_FOCAL', 'L4-FOCAL', 'L4_FOCAL'):
+            # 从 loss_type 解析出 variant（L1 / L2 / L3 / L4）
+            variant  = loss_type.replace('_', '-').split('-')[0]   # 'L1' / 'L2' / 'L3' / 'L4'
+            gamma    = getattr(args, 'focal_gamma', 2.0)
+            alpha    = getattr(args, 'focal_alpha', 0.75)
+            focal_w  = getattr(args, 'focal_w',     1.0)
+            self.loss_fun = FocalIoULoss(variant=variant, gamma=gamma, alpha=alpha, focal_w=focal_w)
+            loss_name_for_dir = f'{variant}Focal'
+            print(f'Using Loss: {variant}+FocalBCE (γ={gamma}, α={alpha}, w={focal_w})')
+        elif loss_type == 'L1':
             self.loss_fun = L1IoULoss()
-            self.use_lloss_for_l1 = True
-            loss_name_for_dir = 'L1'
-            print(f'Using Loss: L1 (L1-based IoU Loss with LLoss)')
+            print(f'Using Loss: L1 (L1-based IoU Loss)')
         elif loss_type == 'L1-ONLY' or loss_type == 'L1_ONLY':
             self.loss_fun = L1IoULoss()
-            self.use_lloss_for_l1 = False
+            self.with_shape = False
             loss_name_for_dir = 'L1-ONLY'
             print(f'Using Loss: L1-ONLY (L1 IoU Loss without LLoss)')
         elif loss_type == 'L2':
-            self.loss_fun = SLSIoULoss()
-            loss_name_for_dir = 'L2'
-            print(f'Using Loss: L2 (SLS IoU Loss - default)')
+            self.loss_fun = L2IoULoss()
+            print(f'Using Loss: L2 (L2-based IoU Loss with LLoss)')
         elif loss_type == 'L2-ONLY' or loss_type == 'L2_ONLY':
             self.loss_fun = L2IoULoss()
-            self.use_lloss_for_l2 = False
+            self.with_shape = False
             loss_name_for_dir = 'L2-ONLY'
             print(f'Using Loss: L2-ONLY (L2 IoU Loss without LLoss)')
         elif loss_type == 'L3':
@@ -187,39 +137,39 @@ class Trainer(object):
             print(f'Using Loss: L3 (Mobius IoU Loss without LLoss)')
         elif loss_type == 'L3D' or loss_type == 'L3+D' or loss_type == 'L3_D':
             self.loss_fun = L3WithDlossIoULoss()
-            loss_name_for_dir = 'L3D'
+            loss_name_for_dir = 'L3D'  # 统一使用 L3D 作为目录名
             print(f'Using Loss: L3+D_loss (L3 IoU Loss with D_loss from IR-SOIoU)')
         elif loss_type == 'L4':
             self.loss_fun = L4IoULoss()
-            self.use_lloss_for_l4 = True
-            loss_name_for_dir = 'L4'
-            print(f'Using Loss: L4 (Man Fung IoU Loss with LLoss)')
+            print(f'Using Loss: L4 (Man Fung IoU Loss)')
         elif loss_type == 'L4-ONLY' or loss_type == 'L4_ONLY':
             self.loss_fun = L4IoULoss()
-            self.use_lloss_for_l4 = False
+            self.with_shape = False
             loss_name_for_dir = 'L4-ONLY'
             print(f'Using Loss: L4-ONLY (L4 IoU Loss without LLoss)')
-        elif loss_type == 'IRSOIOU' or loss_type == 'IR-SOIOU' or loss_type == 'RSOIOU':
-            self.loss_fun = IRSOIoULoss()
-            loss_name_for_dir = 'IRSOIOU'
-            print(f'Using Loss: IR-SOIoU (Region Energy-Based Dynamic Loss with D_loss)')
-        elif loss_type == 'IRSOIOU_LLOSS' or loss_type == 'IRSOIOU-LLOSS' or loss_type == 'IRSOIOU_LL':
-            self.loss_fun = IRSOIoULoss()
-            self.use_lloss_for_irsoiou = True
-            loss_name_for_dir = 'IRSOIOU-LLOSS'
-            print(f'Using Loss: IR-SOIoU with LLoss')
-        elif loss_type == 'LLOSS_ONLY' or loss_type == 'LLOSS-ONLY':
+        elif loss_type == 'LLOSS-ONLY' or loss_type == 'LLOSS_ONLY':
             self.loss_fun = LLossOnlyLoss()
             loss_name_for_dir = 'LLOSS-ONLY'
-            print(f'Using Loss: LLoss only (location/shape loss only)')
-        elif loss_type == 'SOFTIOU':
+            print(f'Using Loss: LLOSS-ONLY (only Location Loss, no IoU — 用于看 location loss 带来的虚警)')
+        elif loss_type == 'SOFTIOU' or loss_type == 'SOFT_IOU':
             self.loss_fun = SoftIoULossModule()
             loss_name_for_dir = 'SOFTIOU'
-            print(f'Using Loss: Soft IoU (standard soft IoU module)')
+            print(f'Using Loss: SoftIoU (标准 Soft IoU Loss)')
+        elif loss_type == 'IRSOIOU' or loss_type == 'IR-SOIOU' or loss_type == 'RSOIOU':
+            # 默认使用 D_loss 版本
+            self.loss_fun = IRSOIoULoss()
+            loss_name_for_dir = 'IRSOIOU'  # 统一使用 IRSOIOU 作为目录名
+            print(f'Using Loss: IR-SOIoU (Region Energy-Based Dynamic Loss with D_loss)')
+        elif loss_type == 'IRSOIOU_LLOSS' or loss_type == 'IRSOIOU-LLOSS' or loss_type == 'IRSOIOU_LL':
+            # 使用 LLoss 版本
+            self.loss_fun = IRSOIoULoss()
+            self.use_lloss_for_irsoiou = True  # 标记使用 LLoss
+            loss_name_for_dir = 'IRSOIOU-LLOSS'  # 使用 IRSOIOU-LLOSS 作为目录名
+            print(f'Using Loss: IR-SOIoU with LLoss (Region Energy-Based Dynamic Loss with LLoss)')
         else:
-            self.loss_fun = SLSIoULoss()
-            loss_name_for_dir = 'L2'  # 默认使用 L2
-            print(f'Unknown loss type {loss_type}, using default L2 (SLS IoU Loss)')
+            self.loss_fun = L2IoULoss()
+            loss_name_for_dir = 'L2'
+            print(f'Unknown loss type {loss_type}, using default L2 (L2 IoU Loss)')
         
         # 保存损失函数名称用于目录命名
         self.loss_name_for_dir = loss_name_for_dir
@@ -230,63 +180,41 @@ class Trainer(object):
         self.best_iou = 0
         self.warm_epoch = args.warm_epoch
 
-        self.use_amp = getattr(args, 'amp', False) and torch.cuda.is_available()
-        if self.use_amp:
-            if torch.cuda.is_bf16_supported():
-                self.amp_dtype = torch.bfloat16
-                self.scaler = None
-                print('AMP enabled: BF16 (no GradScaler needed)')
-            else:
-                self.amp_dtype = torch.float16
-                self.scaler = torch.cuda.amp.GradScaler()
-                print('AMP enabled: FP16 + GradScaler')
-        else:
-            self.amp_dtype = None
-            self.scaler = None
-
         if args.mode=='train':
-            if args.if_checkpoint:
-                check_folder = getattr(args, 'checkpoint_dir', '').strip()
-                if not check_folder:
-                    raise ValueError('Resume requires --checkpoint-dir')
+            if args.if_checkpoint and getattr(args, 'checkpoint_dir', '').strip():
+                check_folder = args.checkpoint_dir.strip()
                 ckpt_path = osp.join(check_folder, 'checkpoint.pkl')
                 if not osp.isfile(ckpt_path):
-                    raise FileNotFoundError(f'checkpoint.pkl not found in: {check_folder}')
+                    raise FileNotFoundError('恢复训练需要 checkpoint.pkl，未找到: %s' % ckpt_path)
                 checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
                 self.model.load_state_dict(checkpoint['net'])
                 self.optimizer.load_state_dict(checkpoint['optimizer'])
-                self.start_epoch = checkpoint['epoch']+1
-                self.best_iou = checkpoint['iou']
+                self.start_epoch = checkpoint['epoch'] + 1
+                self.best_iou = checkpoint.get('iou', 0)
                 self.save_folder = check_folder
+                print('从 checkpoint 恢复: %s, 从 epoch %d 继续, best_iou %.4f' % (check_folder, self.start_epoch, self.best_iou))
             else:
-                # 使用相对路径，兼容Windows和Linux，包含损失函数类型
                 timestamp = time.strftime('%Y-%m-%d-%H-%M-%S', time.localtime(time.time()))
-                gp_suffix = '-GP' if getattr(self.args, 'use_gaussian_pinwheel', False) else ''
-                rot_suffix = '-Rot' if getattr(self.args, 'use_rotated_pinwheel', False) else ''
-                learn_rot_suffix = '-LearnRot' if getattr(self.args, 'use_learnable_rotated_pinwheel', False) else ''
-                rot_weight_suffix = '-RotWeight' if getattr(self.args, 'use_rot_weight', False) else ''
-                rot_weight_two_suffix = '-RotWeight2' if getattr(self.args, 'use_rot_weight_two', False) else ''
-                gp_pl = getattr(self.args, 'gp_pipeline', None)
-                pipeline_suffix = '-PipelineA' if gp_pl == 'A' else '-PipelineB' if gp_pl == 'B' else ''
-                save_base = osp.join('weight', f'MSHNet-{self.loss_name_for_dir}{gp_suffix}{rot_suffix}{learn_rot_suffix}{rot_weight_suffix}{rot_weight_two_suffix}{pipeline_suffix}-{timestamp}')
+                save_base = osp.join('weight', f'MSHNet-base-{self.loss_name_for_dir}-{timestamp}')
                 self.save_folder = save_base
                 if not osp.exists(self.save_folder):
                     os.makedirs(self.save_folder, exist_ok=True)
         if args.mode=='test':
-          
-            weight = torch.load(args.weight_path)
-            # 兼容两种格式：直接state_dict或包含state_dict的字典
-            if isinstance(weight, dict):
-                if 'state_dict' in weight:
-                    self.model.load_state_dict(weight['state_dict'])
-                elif 'net' in weight:
-                    self.model.load_state_dict(weight['net'])
-                else:
-                    # 如果字典的键看起来像模型参数，直接使用
-                    self.model.load_state_dict(weight)
-            else:
-                # 直接是state_dict
-                self.model.load_state_dict(weight)
+            weight = torch.load(args.weight_path, map_location=self.device, weights_only=True)
+            state = weight['state_dict'] if isinstance(weight, dict) and 'state_dict' in weight else \
+                    weight['net'] if isinstance(weight, dict) and 'net' in weight else weight
+            if not isinstance(state, dict):
+                state = weight
+            # 兼容训练时 DataParallel 保存的 "module." 前缀
+            if isinstance(state, dict) and state and any(k.startswith('module.') for k in state.keys()):
+                state = {k.replace('module.', '', 1) if k.startswith('module.') else k: v for k, v in state.items()}
+            load_ret = self.model.load_state_dict(state, strict=False)
+            if load_ret.missing_keys or load_ret.unexpected_keys:
+                print('[Test] load_state_dict 非严格匹配:')
+                if load_ret.missing_keys:
+                    print('  missing_keys (未加载，将用随机初始化):', load_ret.missing_keys[:8], '...' if len(load_ret.missing_keys) > 8 else '')
+                if load_ret.unexpected_keys:
+                    print('  unexpected_keys (被忽略):', load_ret.unexpected_keys[:8], '...' if len(load_ret.unexpected_keys) > 8 else '')
             '''
                 # iou_67.87_weight
                 weight = torch.load(args.weight_path)
@@ -294,51 +222,6 @@ class Trainer(object):
             '''
             self.warm_epoch = -1
         
-
-    def _compute_loss(self, pred, masks, labels, epoch):
-        loss = 0
-        if hasattr(self, 'use_lloss_for_irsoiou') and isinstance(self.loss_fun, IRSOIoULoss):
-            with_shape = self.use_lloss_for_irsoiou
-            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
-            for j in range(len(masks)):
-                if j>0:
-                    labels = self.down(labels)
-                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
-        elif hasattr(self, 'use_lloss_for_l3') and isinstance(self.loss_fun, L3IoULoss):
-            with_shape = self.use_lloss_for_l3
-            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
-            for j in range(len(masks)):
-                if j>0:
-                    labels = self.down(labels)
-                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
-        elif hasattr(self, 'use_lloss_for_l1') and isinstance(self.loss_fun, L1IoULoss):
-            with_shape = self.use_lloss_for_l1
-            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
-            for j in range(len(masks)):
-                if j>0:
-                    labels = self.down(labels)
-                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
-        elif hasattr(self, 'use_lloss_for_l2') and isinstance(self.loss_fun, L2IoULoss):
-            with_shape = self.use_lloss_for_l2
-            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
-            for j in range(len(masks)):
-                if j>0:
-                    labels = self.down(labels)
-                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
-        elif hasattr(self, 'use_lloss_for_l4') and isinstance(self.loss_fun, L4IoULoss):
-            with_shape = self.use_lloss_for_l4
-            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
-            for j in range(len(masks)):
-                if j>0:
-                    labels = self.down(labels)
-                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
-        else:
-            loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch)
-            for j in range(len(masks)):
-                if j>0:
-                    labels = self.down(labels)
-                loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch)
-        return loss / (len(masks)+1)
 
     def train(self, epoch):
         self.model.train()
@@ -353,24 +236,41 @@ class Trainer(object):
             if epoch>self.warm_epoch:
                 tag = True
 
-            if self.use_amp:
-                with torch.amp.autocast('cuda', dtype=self.amp_dtype):
-                    masks_out, pred = self.model(data, tag)
-                    loss = self._compute_loss(pred, masks_out, labels, epoch)
-                self.optimizer.zero_grad()
-                if self.scaler is not None:
-                    self.scaler.scale(loss).backward()
-                    self.scaler.step(self.optimizer)
-                    self.scaler.update()
-                else:
-                    loss.backward()
-                    self.optimizer.step()
+            masks, pred = self.model(data, tag)
+            loss = 0
+            # 论文 Eq.(8): L = (1/5)[ Σ_{i=1}^4 L_SLS(p_i, ↓(p_gt, 2^(4-i))) + L_SLS(p, p_gt) ]
+            # 对应: pred↔p, masks[0]↔p_4(full), masks[1]↔p_3(↓2), masks[2]↔p_2(↓4), masks[3]↔p_1(↓8)；GT 用 MaxPool2d(2,2) 逐级下采样
+            # 对于 IRSOIOU，根据 use_lloss_for_irsoiou 决定是否使用 LLoss
+            # 对于 L3，根据 use_lloss_for_l3 决定是否使用 LLoss
+            # 对于其他损失函数，使用默认的 with_shape=True
+            if hasattr(self, 'use_lloss_for_irsoiou') and isinstance(self.loss_fun, IRSOIoULoss):
+                with_shape = self.use_lloss_for_irsoiou
+                loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
+                for j in range(len(masks)):
+                    if j > 0 and not self.full_res_deepsup:
+                        labels = self.down(labels)
+                    loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
+            elif hasattr(self, 'use_lloss_for_l3') and isinstance(self.loss_fun, L3IoULoss):
+                with_shape = self.use_lloss_for_l3
+                loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
+                for j in range(len(masks)):
+                    if j > 0 and not self.full_res_deepsup:
+                        labels = self.down(labels)
+                    loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
             else:
-                masks_out, pred = self.model(data, tag)
-                loss = self._compute_loss(pred, masks_out, labels, epoch)
-                self.optimizer.zero_grad()
-                loss.backward()
-                self.optimizer.step()
+                # 其他损失函数（L1/L2/L4 及其 *-ONLY）：with_shape 由 getattr 决定，ONLY 时为 False
+                with_shape = getattr(self, 'with_shape', True)
+                loss = loss + self.loss_fun(pred, labels, self.warm_epoch, epoch, with_shape=with_shape)
+                for j in range(len(masks)):
+                    if j > 0 and not self.full_res_deepsup:
+                        labels = self.down(labels)
+                    loss = loss + self.loss_fun(masks[j], labels, self.warm_epoch, epoch, with_shape=with_shape)
+                
+            loss = loss / (len(masks)+1)
+        
+            self.optimizer.zero_grad()
+            loss.backward()
+            self.optimizer.step()
        
             losses.update(loss.item(), pred.size(0))
             tbar.set_description('Epoch %d, loss %.4f' % (epoch, losses.avg))
@@ -390,11 +290,9 @@ class Trainer(object):
                 if epoch>self.warm_epoch:
                     tag = True
 
-                if self.use_amp:
-                    with torch.amp.autocast('cuda', dtype=self.amp_dtype):
-                        _, pred = self.model(data, tag)
-                else:
-                    _, pred = self.model(data, tag)
+                loss = 0
+                _, pred = self.model(data, tag)
+                # loss += self.loss_fun(pred, mask,self.warm_epoch, epoch)
 
                 self.mIoU.update(pred, mask)
                 self.PD_FA.update(pred, mask)
@@ -404,7 +302,9 @@ class Trainer(object):
                 tbar.set_description('Epoch %d, IoU %.4f' % (epoch, mean_IoU))
             FA, PD = self.PD_FA.get(len(self.val_loader))
             _, mean_IoU = self.mIoU.get()
+            ture_positive_rate, false_positive_rate, _, _ = self.ROC.get()
 
+            
             if self.mode == 'train':
                 if mean_IoU > self.best_iou:
                     self.best_iou = mean_IoU
@@ -435,3 +335,4 @@ if __name__ == '__main__':
             trainer.test(epoch)
     else:
         trainer.test(1)
+ 
